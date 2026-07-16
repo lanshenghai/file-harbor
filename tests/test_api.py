@@ -120,6 +120,11 @@ def test_api_connect_tree_download_and_delete(monkeypatch, tmp_path):
     assert progress_data["status"] == "done"
     assert progress_data["done"] == 1
     assert progress_data["total"] == 1
+    assert progress_data["protocol"] == "sftp"
+    assert progress_data["workers"] == 2
+    assert progress_data["total_bytes"] == 2
+    assert progress_data["bytes_done"] == 2
+    assert progress_data["speed_bps"] >= 0
     assert progress_data["errors"] == []
     assert (tmp_path / "logs" / "a.bin").read_bytes() == b"xy"
 
@@ -317,6 +322,100 @@ def test_api_cancels_download_without_browser_session(monkeypatch, tmp_path):
     assert response.json()["status"] == "cancelling"
     assert repeated.status_code == 200
     assert repeated.json()["status"] in {"cancelling", "cancelled"}
+    assert missing.status_code == 404
+
+
+def test_api_retries_download_after_errors(monkeypatch, tmp_path):
+    root = "/root"
+    fail_once_path = f"{root}/first.bin"
+    ok_path = f"{root}/second.bin"
+
+    class FlakyBackend(FakeBackend):
+        def __init__(self, tree, files):
+            super().__init__(tree=tree, files=files)
+            self._failed_once: set[str] = set()
+
+        def download_file(self, remote_path, local_path, cancel_event=None):
+            if remote_path == fail_once_path and remote_path not in self._failed_once:
+                self._failed_once.add(remote_path)
+                raise RuntimeError("temporary remote read failure")
+            super().download_file(remote_path, local_path, cancel_event)
+
+    backend = FlakyBackend(
+        tree={
+            root: [
+                Entry("first.bin", fail_once_path, "file", 1),
+                Entry("second.bin", ok_path, "file", 1),
+            ]
+        },
+        files={fail_once_path: b"a", ok_path: b"b"},
+    )
+    manager = DownloadManager()
+    failed_job_id = manager.start(
+        backend=backend,
+        root=root,
+        protocol="sftp",
+        items=[{"path": root, "type": "dir"}],
+        local_dir=str(tmp_path),
+        workers=2,
+    )
+    for _ in range(100):
+        failed_job = manager.get(failed_job_id)
+        if failed_job.status in {"done_with_errors", "failed"}:
+            break
+        time.sleep(0.01)
+
+    main = importlib.import_module("app.main")
+    monkeypatch.setattr(main, "DOWNLOADS", manager)
+    client = TestClient(main.app)
+
+    retry = client.post(f"/api/download/{failed_job_id}/retry")
+    assert retry.status_code == 200
+    retry_job_id = retry.json()["job_id"]
+    assert retry_job_id != failed_job_id
+
+    for _ in range(100):
+        progress = client.get(f"/api/download/{retry_job_id}")
+        assert progress.status_code == 200
+        if progress.json()["status"] in {"done", "done_with_errors", "failed"}:
+            break
+        time.sleep(0.01)
+
+    payload = progress.json()
+    assert payload["status"] == "done"
+    assert payload["total"] == 1
+    assert payload["done"] == 1
+
+
+def test_api_removes_completed_job(monkeypatch, tmp_path):
+    root = "/root"
+    backend = FakeBackend(
+        tree={root: [Entry("a.bin", f"{root}/a.bin", "file", 1)]},
+        files={f"{root}/a.bin": b"x"},
+    )
+    manager = DownloadManager()
+    job_id = manager.start(
+        backend=backend,
+        root=root,
+        protocol="sftp",
+        items=[{"path": f"{root}/a.bin", "type": "file"}],
+        local_dir=str(tmp_path),
+        workers=1,
+    )
+    for _ in range(100):
+        progress = manager.get(job_id)
+        if progress.status in {"done", "done_with_errors", "failed"}:
+            break
+        time.sleep(0.01)
+
+    main = importlib.import_module("app.main")
+    monkeypatch.setattr(main, "DOWNLOADS", manager)
+    client = TestClient(main.app)
+
+    removed = client.delete(f"/api/download/{job_id}")
+    missing = client.get(f"/api/download/{job_id}")
+
+    assert removed.status_code == 204
     assert missing.status_code == 404
 
 

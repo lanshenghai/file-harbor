@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from typing import Protocol
+from typing import Callable, Protocol
 
 
 @dataclass
@@ -24,7 +24,11 @@ class Backend(Protocol):
     def walk_files(self, path: str) -> list[tuple[str, int | None]]: ...
 
     def download_file(
-        self, remote_path: str, local_path: Path, cancel_event: Event | None = None
+        self,
+        remote_path: str,
+        local_path: Path,
+        cancel_event: Event | None = None,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> None: ...
 
     def close(self) -> None: ...
@@ -59,7 +63,11 @@ class FakeBackend:
         return walked
 
     def download_file(
-        self, remote_path: str, local_path: Path, cancel_event: Event | None = None
+        self,
+        remote_path: str,
+        local_path: Path,
+        cancel_event: Event | None = None,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> None:
         if cancel_event is not None and cancel_event.is_set():
             raise DownloadCancelled()
@@ -69,6 +77,8 @@ class FakeBackend:
         partial_path = local_path.with_name(local_path.name + ".part")
         try:
             partial_path.write_bytes(self._files[remote_path])
+            if progress_callback is not None:
+                progress_callback(len(self._files[remote_path]))
             if cancel_event is not None and cancel_event.is_set():
                 raise DownloadCancelled()
             partial_path.replace(local_path)

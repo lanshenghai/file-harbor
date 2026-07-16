@@ -7,11 +7,11 @@ directory on the **machine running this server**.
 
 ```bash
 pip install -r requirements.txt
-./install_samba_client.sh
 ```
 
-`install_samba_client.sh` installs the native Samba client under `.tools/` without sudo.
-SMB uses a private Kerberos cache created from server-side credentials.
+SMB requires `gio`, `gvfs-smb`, `gvfs-fuse`, and `libsmbclient`. It uses one
+persistent GVFS mount so concurrent downloads share the same SMB session.
+Kerberos authentication still uses server-side credentials.
 
 Create a project-local configuration file:
 

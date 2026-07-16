@@ -38,7 +38,28 @@ def load_project_env(path: str | Path = ENV_FILE) -> None:
 load_project_env()
 
 SESSIONS = SessionStore(idle_ttl=3600)
-DOWNLOADS = DownloadManager()
+
+
+def _open_retry_backend(protocol: str, host: str, root: str) -> Backend:
+    saved = load_saved_credentials()
+    if saved is None:
+        raise ValueError(
+            "Missing ~/.smbcredentials (need username/password/domain) or SMB_PASS env"
+        )
+    return open_backend(
+        protocol,
+        username=saved.username,
+        password=saved.password,
+        domain=saved.domain if protocol.lower() == "smb" else "",
+        host=host,
+        root=root,
+    )
+
+
+DOWNLOADS = DownloadManager(
+    state_file=STATIC_DIR.parent / ".runtime" / "download-jobs.json",
+    backend_factory=_open_retry_backend,
+)
 _BACKENDS: dict[str, Backend] = {}
 _BACKENDS_LOCK = Lock()
 
@@ -247,6 +268,7 @@ def download(body: DownloadRequest) -> dict[str, str]:
     job_id = DOWNLOADS.start(
         backend=backend,
         root=session.root,
+        host=session.host,
         protocol=session.protocol,
         items=normalized_items,
         local_dir=body.local_dir,
@@ -270,6 +292,15 @@ def cancel_download(job_id: str) -> dict[str, object]:
     return asdict(progress)
 
 
+@app.post("/api/download/{job_id}/retry")
+def retry_download(job_id: str) -> dict[str, str]:
+    try:
+        new_job_id = DOWNLOADS.retry(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown job") from exc
+    return {"job_id": new_job_id}
+
+
 @app.get("/api/download/{job_id}")
 def download_status(job_id: str, session_id: str | None = Query(None)) -> dict[str, object]:
     if session_id is not None:
@@ -279,6 +310,15 @@ def download_status(job_id: str, session_id: str | None = Query(None)) -> dict[s
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unknown job") from exc
     return asdict(progress)
+
+
+@app.delete("/api/download/{job_id}", status_code=204)
+def delete_download(job_id: str) -> Response:
+    try:
+        DOWNLOADS.remove(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown job") from exc
+    return Response(status_code=204)
 
 
 @app.delete("/api/session/{session_id}", status_code=204)

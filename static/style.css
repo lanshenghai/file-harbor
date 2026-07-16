@@ -338,21 +338,66 @@ button.ghost {
   gap: 8px;
 }
 
+.download-job-id {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .download-job-actions {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.download-job-summary {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #8b949e;
+  font-size: 10px;
 }
 
 button.cancel-job {
   border-color: #da3633;
   background: #7d1f1a;
-  padding: 3px 6px;
-  font-size: 10px;
+  padding: 2px 5px;
+  font-size: 9px;
+  border-radius: 5px;
+  line-height: 1.1;
 }
 
 button.cancel-job:hover {
   background: #9e2a24;
+}
+
+button.retry-job {
+  border-color: #2f81f7;
+  background: #1f3d75;
+  padding: 2px 5px;
+  font-size: 9px;
+  border-radius: 5px;
+  line-height: 1.1;
+}
+
+button.retry-job:hover {
+  background: #28519b;
+}
+
+button.remove-job {
+  border-color: #6e7681;
+  background: #262c34;
+  padding: 2px 5px;
+  font-size: 9px;
+  border-radius: 5px;
+  line-height: 1.1;
+}
+
+button.remove-job:hover {
+  background: #323a44;
 }
 
 progress {

@@ -5,8 +5,10 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
-from threading import Event
+from threading import Event, Lock
 import time
+from typing import Callable
+from urllib.parse import quote
 
 from app.pathutil import parse_unc
 
@@ -19,6 +21,180 @@ _LISTING_RE = re.compile(
     r"^\s{2}(?P<name>.*?)\s+(?P<attrs>[A-Z]+)\s+(?P<size>\d+)\s+"
     r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+"
 )
+_GVFS_LOCK = Lock()
+_GVFS_FUSE_PROCESS: subprocess.Popen[bytes] | None = None
+
+
+class GvfsSmbClient:
+    """Use one persistent GVFS/libsmbclient session for concurrent file reads."""
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        share: str,
+        username: str,
+        password: str,
+        domain: str,
+    ) -> None:
+        realm = domain.upper()
+        if not realm:
+            raise ValueError("SMB domain (Kerberos realm) is required")
+        if "." not in realm:
+            realm += ".NET"
+
+        self.host = host
+        self.share = share
+        self.principal = f"{username}@{realm}"
+        self.uri = f"smb://{quote(host)}/{quote(share)}"
+        self._closed = False
+
+        result = subprocess.run(
+            ["kinit", "-f", self.principal],
+            input=(password + "\n").encode(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.decode(errors="replace").strip()
+            raise PermissionError(f"Kerberos authentication failed for {self.principal}: {detail}")
+
+        self.mount_root = self._ensure_mount()
+
+    def listdir(self, relative_path: str) -> list[tuple[str, bool, int]]:
+        uri = self._uri_path(relative_path)
+        try:
+            result = subprocess.run(
+                [
+                    "gio",
+                    "list",
+                    "-a",
+                    "standard::name,standard::type,standard::size",
+                    uri,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ConnectionError("GVFS SMB listing timed out after 30s") from exc
+        if result.returncode != 0:
+            detail = result.stderr.decode(errors="replace").strip()
+            raise ConnectionError(f"GVFS SMB listing failed: {detail}")
+
+        entries: list[tuple[str, bool, int]] = []
+        for line in result.stdout.decode(errors="replace").splitlines():
+            fields = line.rsplit("\t", 2)
+            if len(fields) != 3:
+                continue
+            name, size_text, kind = fields
+            is_dir = kind == "(directory)"
+            entries.append((name, is_dir, int(size_text)))
+        return entries
+
+    def download(
+        self,
+        relative_path: str,
+        local_path: Path,
+        cancel_event: Event | None = None,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> None:
+        cancel_event = cancel_event or Event()
+        partial_path = local_path.with_name(local_path.name + ".part")
+        last_error: OSError | None = None
+
+        for _ in range(4):
+            if cancel_event.is_set():
+                partial_path.unlink(missing_ok=True)
+                raise DownloadCancelled()
+
+            offset = partial_path.stat().st_size if partial_path.exists() else 0
+            try:
+                source_path = self._local_path(relative_path)
+                with source_path.open("rb") as source:
+                    source.seek(offset)
+                    with partial_path.open("ab") as target:
+                        while True:
+                            if cancel_event.is_set():
+                                partial_path.unlink(missing_ok=True)
+                                raise DownloadCancelled()
+                            chunk = source.read(1024 * 1024)
+                            if not chunk:
+                                partial_path.replace(local_path)
+                                return
+                            target.write(chunk)
+                            if progress_callback is not None:
+                                progress_callback(len(chunk))
+            except DownloadCancelled:
+                raise
+            except OSError as exc:
+                last_error = exc
+                if isinstance(exc, FileNotFoundError):
+                    try:
+                        self.mount_root = self._ensure_mount()
+                    except Exception:
+                        pass
+                time.sleep(1)
+
+        assert last_error is not None
+        raise ConnectionError(f"GVFS SMB download failed after retries: {last_error}") from last_error
+
+    def close(self) -> None:
+        self._closed = True
+
+    def _ensure_mount(self) -> Path:
+        global _GVFS_FUSE_PROCESS
+
+        runtime_root = Path(f"/run/user/{os.getuid()}/gvfs")
+        mount_root = runtime_root / f"smb-share:server={self.host.lower()},share={self.share.lower()}"
+        with _GVFS_LOCK:
+            mount = subprocess.run(
+                ["gio", "mount", self.uri],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+            mount_detail = (mount.stderr or mount.stdout).decode(errors="replace")
+            if mount.returncode != 0 and "already mounted" not in mount_detail.lower():
+                raise ConnectionError(f"GVFS SMB mount failed: {mount_detail.strip()}")
+
+            if mount_root.is_dir():
+                return mount_root
+
+            runtime_root.mkdir(parents=True, exist_ok=True)
+            fuse_binary = Path("/usr/libexec/gvfsd-fuse")
+            if not fuse_binary.is_file():
+                raise ConnectionError("GVFS FUSE bridge is not installed")
+            if _GVFS_FUSE_PROCESS is None or _GVFS_FUSE_PROCESS.poll() is not None:
+                _GVFS_FUSE_PROCESS = subprocess.Popen(
+                    [str(fuse_binary), str(runtime_root), "-f", "-o", "big_writes"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+            for _ in range(50):
+                if mount_root.is_dir():
+                    return mount_root
+                time.sleep(0.1)
+
+        raise ConnectionError(f"GVFS SMB mount is not visible at {mount_root}")
+
+    def _local_path(self, relative_path: str) -> Path:
+        parts = [part for part in relative_path.replace("\\", "/").split("/") if part]
+        if any(part in {".", ".."} for part in parts):
+            raise ValueError("SMB path contains an unsafe segment")
+        return self.mount_root.joinpath(*parts)
+
+    def _uri_path(self, relative_path: str) -> str:
+        parts = [part for part in relative_path.replace("\\", "/").split("/") if part]
+        if any(part in {".", ".."} for part in parts):
+            raise ValueError("SMB path contains an unsafe segment")
+        suffix = "/".join(quote(part, safe="") for part in parts)
+        return f"{self.uri}/{suffix}" if suffix else self.uri
 
 
 class NativeSmbClient:
@@ -102,7 +278,11 @@ class NativeSmbClient:
         return entries
 
     def download(
-        self, relative_path: str, local_path: Path, cancel_event: Event | None = None
+        self,
+        relative_path: str,
+        local_path: Path,
+        cancel_event: Event | None = None,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> None:
         partial_path = local_path.with_name(local_path.name + ".part")
         last_error: ConnectionError | None = None
@@ -125,6 +305,8 @@ class NativeSmbClient:
                 if cancel_event is not None and cancel_event.is_set():
                     raise DownloadCancelled()
                 partial_path.replace(local_path)
+                if progress_callback is not None:
+                    progress_callback(local_path.stat().st_size)
                 return
         except DownloadCancelled:
             partial_path.unlink(missing_ok=True)
@@ -259,7 +441,7 @@ class SmbBackend:
         self.host = host
         self.root = root
         self.share = root_parts.share
-        self._client = NativeSmbClient(
+        self._client = GvfsSmbClient(
             host=host,
             share=self.share,
             username=username,
@@ -296,10 +478,19 @@ class SmbBackend:
         return files
 
     def download_file(
-        self, remote_path: str, local_path: Path, cancel_event: Event | None = None
+        self,
+        remote_path: str,
+        local_path: Path,
+        cancel_event: Event | None = None,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> None:
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        self._client.download(self._relative(remote_path), local_path, cancel_event)
+        self._client.download(
+            self._relative(remote_path),
+            local_path,
+            cancel_event,
+            progress_callback=progress_callback,
+        )
 
     def close(self) -> None:
         self._client.close()

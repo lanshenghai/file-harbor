@@ -22,12 +22,12 @@ def test_native_samba_client_requires_kerberos_realm(tmp_path):
         )
 
 
-def test_native_samba_backend_lists_and_downloads(monkeypatch, tmp_path):
+def test_gvfs_backend_lists_and_downloads(monkeypatch, tmp_path):
     from app.backends import smb
 
     calls: list[tuple[str, object]] = []
 
-    class FakeNativeClient:
+    class FakeGvfsClient:
         def __init__(self, **kwargs):
             calls.append(("init", kwargs))
 
@@ -37,14 +37,16 @@ def test_native_samba_backend_lists_and_downloads(monkeypatch, tmp_path):
                 return [("sub dir", True, 0), ("a.bin", False, 3)]
             return []
 
-        def download(self, relative_path, local_path, cancel_event=None):
+        def download(self, relative_path, local_path, cancel_event=None, progress_callback=None):
             calls.append(("download", (relative_path, local_path)))
             Path(local_path).write_bytes(b"abc")
+            if progress_callback is not None:
+                progress_callback(3)
 
         def close(self):
             calls.append(("close", None))
 
-    monkeypatch.setattr(smb, "NativeSmbClient", FakeNativeClient)
+    monkeypatch.setattr(smb, "GvfsSmbClient", FakeGvfsClient)
 
     backend = smb.SmbBackend(
         host="server",
@@ -122,3 +124,44 @@ def test_native_samba_download_cancellation_terminates_process_and_removes_parti
     assert process.killed is False
     assert not target.exists()
     assert not partial.exists()
+
+
+def test_gvfs_download_remounts_when_mount_path_disappears(monkeypatch, tmp_path):
+    from app.backends import smb
+
+    data = b"abc"
+    mounted_root = tmp_path / "mounted"
+    mounted_root.mkdir()
+    remote_file = mounted_root / "root" / "a.bin"
+    remote_file.parent.mkdir(parents=True, exist_ok=True)
+    remote_file.write_bytes(data)
+
+    client = smb.GvfsSmbClient.__new__(smb.GvfsSmbClient)
+    client.mount_root = tmp_path / "missing-mount"
+    client._closed = False
+
+    local_path_calls = {"count": 0}
+
+    def fake_local_path(relative_path):
+        local_path_calls["count"] += 1
+        if local_path_calls["count"] == 1:
+            return client.mount_root / "root" / "a.bin"
+        return mounted_root / "root" / "a.bin"
+
+    remount_calls = {"count": 0}
+
+    def fake_ensure_mount():
+        remount_calls["count"] += 1
+        client.mount_root = mounted_root
+        return mounted_root
+
+    monkeypatch.setattr(client, "_local_path", fake_local_path)
+    monkeypatch.setattr(client, "_ensure_mount", fake_ensure_mount)
+    monkeypatch.setattr(smb.time, "sleep", lambda _: None)
+
+    target = tmp_path / "downloaded.bin"
+    client.download("root\\a.bin", target)
+
+    assert target.read_bytes() == data
+    assert remount_calls["count"] >= 1
+    assert local_path_calls["count"] >= 2

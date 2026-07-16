@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import socket
 import stat
-from threading import Event
+from threading import Event, Lock
+from typing import Callable
 
 import paramiko
 
@@ -29,6 +30,7 @@ class SftpBackend:
         self.host = host
         self.root = root
         self.username = username
+        self._sftp_lock = Lock()
         self._ssh = paramiko.SSHClient()
         self._ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
@@ -53,7 +55,9 @@ class SftpBackend:
 
     def listdir(self, path: str) -> list[Entry]:
         entries: list[Entry] = []
-        for attr in self._sftp.listdir_attr(path):
+        with self._sftp_lock:
+            listed = list(self._sftp.listdir_attr(path))
+        for attr in listed:
             is_dir = self._is_dir(attr.st_mode)
             entries.append(
                 Entry(
@@ -75,21 +79,28 @@ class SftpBackend:
         return files
 
     def download_file(
-        self, remote_path: str, local_path: Path, cancel_event: Event | None = None
+        self,
+        remote_path: str,
+        local_path: Path,
+        cancel_event: Event | None = None,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> None:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         partial_path = local_path.with_name(local_path.name + ".part")
         try:
-            with self._sftp.open(remote_path, "rb") as source, partial_path.open("wb") as target:
-                while True:
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise DownloadCancelled()
-                    chunk = source.read(256 * 1024)
-                    if not chunk:
-                        break
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise DownloadCancelled()
-                    target.write(chunk)
+            with self._sftp_lock:
+                with self._sftp.open(remote_path, "rb") as source, partial_path.open("wb") as target:
+                    while True:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise DownloadCancelled()
+                        chunk = source.read(256 * 1024)
+                        if not chunk:
+                            break
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise DownloadCancelled()
+                        target.write(chunk)
+                        if progress_callback is not None:
+                            progress_callback(len(chunk))
             if cancel_event is not None and cancel_event.is_set():
                 raise DownloadCancelled()
             partial_path.replace(local_path)

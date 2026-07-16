@@ -32,6 +32,15 @@ function updateSelectionCount() {
 
 function syncProtocolVisibility() {
   state.protocol = connectForm.elements.protocol.value;
+  const workers = downloadForm.elements.workers;
+  if (state.protocol === "smb") {
+    workers.max = "4";
+    if (Number.parseInt(workers.value, 10) > 4) {
+      workers.value = "4";
+    }
+  } else {
+    workers.max = "16";
+  }
 }
 
 function formatSize(size) {
@@ -45,6 +54,19 @@ function formatSize(size) {
     return `${(size / 1024).toFixed(1)} KiB`;
   }
   return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function formatSpeed(speedBps) {
+  if (!Number.isFinite(speedBps) || speedBps <= 0) {
+    return "";
+  }
+  if (speedBps < 1024) {
+    return `${speedBps.toFixed(0)} B/s`;
+  }
+  if (speedBps < 1024 * 1024) {
+    return `${(speedBps / 1024).toFixed(1)} KiB/s`;
+  }
+  return `${(speedBps / (1024 * 1024)).toFixed(1)} MiB/s`;
 }
 
 async function api(url, options = {}) {
@@ -235,6 +257,41 @@ async function cancelDownloadJob(jobId, button) {
   }
 }
 
+async function retryDownloadJob(jobId, button) {
+  button.disabled = true;
+  try {
+    const data = await api(`/api/download/${encodeURIComponent(jobId)}/retry`, {
+      method: "POST",
+    });
+    try {
+      await api(`/api/download/${encodeURIComponent(jobId)}`, {
+        method: "DELETE",
+      });
+    } catch (removeError) {
+      // Keep new retry job even if old history cleanup fails.
+    }
+    setStatus(`Retry started (${data.job_id.slice(0, 8)}).`);
+    await pollDownloadQueue();
+  } catch (error) {
+    button.disabled = false;
+    setStatus(`Retry failed: ${error.message}`, true);
+  }
+}
+
+async function removeDownloadJob(jobId, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/download/${encodeURIComponent(jobId)}`, {
+      method: "DELETE",
+    });
+    setStatus(`Removed job ${jobId.slice(0, 8)}.`);
+    await pollDownloadQueue();
+  } catch (error) {
+    button.disabled = false;
+    setStatus(`Remove failed: ${error.message}`, true);
+  }
+}
+
 function renderDownloadQueue(jobs) {
   if (!jobs.length) {
     const empty = document.createElement("div");
@@ -248,15 +305,34 @@ function renderDownloadQueue(jobs) {
     const card = document.createElement("article");
     card.className = "download-job";
     card.dataset.jobId = job.id;
+    const hoverPaths = Array.isArray(job.paths)
+      ? job.paths.filter((path) => typeof path === "string" && path)
+      : [];
+    card.title = hoverPaths.join("\n");
 
     const header = document.createElement("div");
     header.className = "download-job-header";
     const id = document.createElement("span");
-    id.className = "mono";
+    id.className = "download-job-id";
     id.textContent = job.id.slice(0, 8);
     id.title = job.id;
     const summary = document.createElement("span");
-    summary.textContent = `${job.status} ${job.done}/${job.total}`;
+    summary.className = "download-job-summary";
+    const summaryParts = [`${job.status} ${job.done}/${job.total}`];
+    if (typeof job.protocol === "string" && job.protocol) {
+      summaryParts.push(job.protocol.toUpperCase());
+    }
+    if (Number.isInteger(job.workers)) {
+      summaryParts.push(`x${job.workers}`);
+    }
+    if (Number.isFinite(job.speed_bps) && job.speed_bps > 0) {
+      summaryParts.push(formatSpeed(job.speed_bps));
+    }
+    summary.textContent = summaryParts.join(" · ");
+    summary.title =
+      Number.isInteger(job.workers) && typeof job.protocol === "string" && job.protocol
+        ? summary.textContent
+        : "Older job details unavailable";
     const actions = document.createElement("span");
     actions.className = "download-job-actions";
     actions.appendChild(summary);
@@ -276,6 +352,25 @@ function renderDownloadQueue(jobs) {
       cancelButton.textContent = "Cancelling…";
       cancelButton.disabled = true;
       actions.appendChild(cancelButton);
+    } else if (["done_with_errors", "failed"].includes(job.status)) {
+      const retryButton = document.createElement("button");
+      retryButton.type = "button";
+      retryButton.className = "retry-job";
+      retryButton.textContent = "Retry";
+      retryButton.addEventListener("click", () =>
+        retryDownloadJob(job.id, retryButton)
+      );
+      actions.appendChild(retryButton);
+    }
+    if (["done", "done_with_errors", "failed", "cancelled"].includes(job.status)) {
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.className = "remove-job";
+      removeButton.textContent = "Remove";
+      removeButton.addEventListener("click", () =>
+        removeDownloadJob(job.id, removeButton)
+      );
+      actions.appendChild(removeButton);
     }
     header.append(id, actions);
 
@@ -286,6 +381,7 @@ function renderDownloadQueue(jobs) {
     const current = document.createElement("div");
     current.className = "mono muted";
     current.textContent = job.current || "";
+    current.title = job.current || "";
 
     const errors = document.createElement("ul");
     errors.className = "error-list";

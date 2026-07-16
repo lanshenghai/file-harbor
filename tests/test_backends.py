@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor
+import time
 from threading import Event
 from types import SimpleNamespace
 
@@ -189,6 +191,65 @@ def test_sftp_download_cancellation_removes_partial_file(monkeypatch, tmp_path):
 
     assert not target.exists()
     assert not (tmp_path / "a.txt.part").exists()
+
+
+def test_sftp_backend_serializes_parallel_downloads_on_single_client(monkeypatch, tmp_path):
+    from app.backends.sftp import SftpBackend
+
+    class NonThreadSafeSftpClient(FakeSftpClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.files["/root/c.txt"] = b"more"
+            self._active_readers = 0
+
+        def open(self, remote_path: str, mode: str):
+            assert mode == "rb"
+            parent = self
+            stream = BytesIO(self.files[remote_path])
+            orig_read = stream.read
+
+            def guarded_read(size=-1):
+                parent._active_readers += 1
+                if parent._active_readers > 1:
+                    parent._active_readers -= 1
+                    raise RuntimeError("Garbage packet received")
+                try:
+                    # Hold the read briefly so a parallel read overlaps.
+                    time.sleep(0.05)
+                    return orig_read(size)
+                finally:
+                    parent._active_readers -= 1
+
+            stream.read = guarded_read
+            return stream
+
+    fake_sftp = NonThreadSafeSftpClient()
+    fake_ssh = FakeSshClient(fake_sftp)
+    fake_paramiko = SimpleNamespace(
+        SSHClient=lambda: fake_ssh,
+        AutoAddPolicy=lambda: "policy",
+        S_ISDIR=lambda mode: bool(mode & 0o040000),
+    )
+    monkeypatch.setattr("app.backends.sftp.paramiko", fake_paramiko)
+    backend = SftpBackend(
+        host="sftp.example.com",
+        root="/root",
+        username="alice",
+        password="secret",
+    )
+
+    target_a = tmp_path / "a.txt"
+    target_c = tmp_path / "c.txt"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(backend.download_file, "/root/a.txt", target_a),
+            pool.submit(backend.download_file, "/root/c.txt", target_c),
+        ]
+        for future in futures:
+            future.result()
+
+    assert target_a.read_bytes() == b"test"
+    assert target_c.read_bytes() == b"more"
 
 
 def test_factory_selects_backend_and_rejects_unknown(monkeypatch):
