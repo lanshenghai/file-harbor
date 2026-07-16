@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>File Harbor</title>
+    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <h1>File Harbor</h1>
+          <p class="tagline">Browse SMB / SFTP · select · download to this server</p>
+        </div>
+        <div id="session-summary" class="session-pill muted">Not connected</div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar">
+          <section class="panel">
+            <h2>Connect</h2>
+            <form id="connect-form" class="stack">
+              <div class="protocol-group">
+                <label class="chip"><input type="radio" name="protocol" value="smb" checked> SMB</label>
+                <label class="chip"><input type="radio" name="protocol" value="sftp"> SFTP</label>
+              </div>
+              <label>
+                Remote Path
+                <textarea id="remote-path" name="remote_path" rows="3" required placeholder="\\files.example.com\shared\projects\example">\\files.example.com\shared\projects\example</textarea>
+              </label>
+              <button type="submit" id="connect-btn">Connect</button>
+              <button type="button" id="retry-sftp-btn" class="ghost hidden">Retry as SFTP</button>
+            </form>
+          </section>
+
+          <section class="panel">
+            <h2>Download</h2>
+            <form id="download-form" class="stack">
+              <label>
+                Local Directory <span class="hint">(on this server)</span>
+                <input id="local-dir" name="local_dir" value="/tmp/file-harbor-downloads" required>
+              </label>
+              <label>
+                Workers
+                <input id="workers" name="workers" type="number" min="1" max="16" value="8">
+              </label>
+              <div class="selection-meta">
+                <span id="selection-count" class="muted">0 selected</span>
+              </div>
+              <button type="submit" id="download-btn">Start Download</button>
+            </form>
+            <div id="download-queue" class="download-queue">
+              <div class="muted">No download jobs</div>
+            </div>
+          </section>
+        </aside>
+
+        <section class="panel browse-panel">
+          <div class="browse-header">
+            <div class="browse-title">
+              <h2>Browse</h2>
+              <span id="browse-hint" class="muted">Connect to load the remote tree</span>
+            </div>
+            <div class="browse-actions">
+              <button type="button" id="select-all" class="ghost" title="Select all currently loaded items">Select All</button>
+              <button type="button" id="deselect-all" class="ghost" title="Clear all selections">Deselect All</button>
+            </div>
+          </div>
+          <div id="tree-root" class="tree empty-state">Connect to load the remote tree.</div>
+        </section>
+      </div>
+
+      <footer class="statusbar">
+        <span id="status-text">Ready.</span>
+      </footer>
+    </div>
+
+    <script src="/static/download-state.js" defer></script>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
