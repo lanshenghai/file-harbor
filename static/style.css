@@ -338,6 +338,23 @@ button.ghost {
   gap: 8px;
 }
 
+.download-job-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+button.cancel-job {
+  border-color: #da3633;
+  background: #7d1f1a;
+  padding: 3px 6px;
+  font-size: 10px;
+}
+
+button.cancel-job:hover {
+  background: #9e2a24;
+}
+
 progress {
   width: 100%;
   height: 10px;

@@ -13,16 +13,18 @@ pip install -r requirements.txt
 `install_samba_client.sh` installs the native Samba client under `.tools/` without sudo.
 SMB uses a private Kerberos cache created from server-side credentials.
 
-Provide credentials through environment variables:
+Create a project-local configuration file:
 
 ```bash
-export SMB_USER="alice"
-export SMB_PASS="your-password"
-export SMB_DOMAIN="EXAMPLE.COM"
-export SFTP_HOST="sftp.example.com"
+cp .env.example .env
 ```
 
-Alternatively, set `SMB_CREDENTIALS` to a file containing:
+Edit `.env` with the SFTP host, SMB domain, credentials, and web server bind
+settings. It is loaded automatically when the app starts and is ignored by Git.
+Existing shell environment variables take precedence over values in `.env`.
+
+Instead of storing credentials in `.env`, set `SMB_CREDENTIALS` there to a file
+containing:
 
 ```ini
 username=alice
@@ -30,7 +32,8 @@ password=your-password
 domain=EXAMPLE.COM
 ```
 
-The default credentials file is `~/.smbcredentials`. Do not commit that file.
+The default credentials file is `~/.smbcredentials`. Never commit `.env` or the
+credentials file.
 
 ## Run
 
@@ -38,12 +41,11 @@ The default credentials file is `~/.smbcredentials`. Do not commit that file.
 python3 -m app.main
 ```
 
-The server listens on `0.0.0.0:8088` by default. Override it with command-line
-arguments or environment variables:
+The server listens on the address and port configured in `.env`. Command-line
+arguments override those values:
 
 ```bash
 python3 -m app.main --host 127.0.0.1 --port 8090
-FILE_HARBOR_HOST=127.0.0.1 FILE_HARBOR_PORT=8090 python3 -m app.main
 ```
 
 Open `http://127.0.0.1:8088`. When binding to a network interface, ensure your

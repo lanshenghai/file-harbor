@@ -60,13 +60,13 @@ def test_download_job_keeps_current_when_files_overlap(tmp_path):
             self.slow_started = Event()
             self.slow_release = Event()
 
-        def download_file(self, remote_path, local_path):
+        def download_file(self, remote_path, local_path, cancel_event=None):
             if remote_path == fast_path:
                 self.slow_started.wait()
             elif remote_path == slow_path:
                 self.slow_started.set()
                 self.slow_release.wait()
-            super().download_file(remote_path, local_path)
+            super().download_file(remote_path, local_path, cancel_event)
 
     fb = BlockingBackend(
         tree={
@@ -174,3 +174,58 @@ def test_download_manager_lists_newest_jobs_as_isolated_snapshots(tmp_path):
     assert [job.id for job in jobs] == [second_id, first_id]
     jobs[0].errors.append("changed outside manager")
     assert "changed outside manager" not in mgr.get(second_id).errors
+
+
+def test_download_manager_cancels_running_job_without_starting_pending_files(tmp_path):
+    root = "/root"
+    first_path = f"{root}/first.bin"
+    second_path = f"{root}/second.bin"
+
+    class CancellableBackend(FakeBackend):
+        def __init__(self, tree, files):
+            super().__init__(tree=tree, files=files)
+            self.started = Event()
+            self.calls = []
+
+        def download_file(self, remote_path, local_path, cancel_event=None):
+            self.calls.append(remote_path)
+            self.started.set()
+            if cancel_event is not None:
+                cancel_event.wait(timeout=2)
+            else:
+                time.sleep(0.1)
+
+    backend = CancellableBackend(
+        tree={
+            root: [
+                Entry("first.bin", first_path, "file", 1),
+                Entry("second.bin", second_path, "file", 1),
+            ]
+        },
+        files={first_path: b"a", second_path: b"b"},
+    )
+    manager = DownloadManager()
+    job_id = manager.start(
+        backend=backend,
+        root=root,
+        protocol="sftp",
+        items=[{"path": root, "type": "dir"}],
+        local_dir=str(tmp_path),
+        workers=1,
+    )
+    assert backend.started.wait(timeout=1)
+
+    cancelling = manager.cancel(job_id)
+
+    assert cancelling.status == "cancelling"
+    assert manager.cancel(job_id).status in {"cancelling", "cancelled"}
+    for _ in range(100):
+        progress = manager.get(job_id)
+        if progress.status == "cancelled":
+            break
+        time.sleep(0.01)
+
+    assert progress.status == "cancelled"
+    assert progress.done == 0
+    assert progress.errors == []
+    assert backend.calls == [first_path]

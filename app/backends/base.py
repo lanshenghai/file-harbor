@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from typing import Protocol
 
 
@@ -13,12 +14,18 @@ class Entry:
     size: int | None = None
 
 
+class DownloadCancelled(Exception):
+    pass
+
+
 class Backend(Protocol):
     def listdir(self, path: str) -> list[Entry]: ...
 
     def walk_files(self, path: str) -> list[tuple[str, int | None]]: ...
 
-    def download_file(self, remote_path: str, local_path: Path) -> None: ...
+    def download_file(
+        self, remote_path: str, local_path: Path, cancel_event: Event | None = None
+    ) -> None: ...
 
     def close(self) -> None: ...
 
@@ -51,11 +58,23 @@ class FakeBackend:
                 walked.append((entry.path, size))
         return walked
 
-    def download_file(self, remote_path: str, local_path: Path) -> None:
+    def download_file(
+        self, remote_path: str, local_path: Path, cancel_event: Event | None = None
+    ) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise DownloadCancelled()
         if remote_path not in self._files:
             raise KeyError(remote_path)
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_bytes(self._files[remote_path])
+        partial_path = local_path.with_name(local_path.name + ".part")
+        try:
+            partial_path.write_bytes(self._files[remote_path])
+            if cancel_event is not None and cancel_event.is_set():
+                raise DownloadCancelled()
+            partial_path.replace(local_path)
+        except BaseException:
+            partial_path.unlink(missing_ok=True)
+            raise
 
     def close(self) -> None:
         return None

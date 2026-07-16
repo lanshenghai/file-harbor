@@ -9,6 +9,7 @@ from threading import Event, Lock, Thread
 from typing import Literal
 
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +28,14 @@ from app.session import Session, SessionStore
 
 SESSION_SWEEP_INTERVAL = 60.0
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+ENV_FILE = STATIC_DIR.parent / ".env"
+
+
+def load_project_env(path: str | Path = ENV_FILE) -> None:
+    load_dotenv(dotenv_path=path, override=False)
+
+
+load_project_env()
 
 SESSIONS = SessionStore(idle_ttl=3600)
 DOWNLOADS = DownloadManager()
@@ -237,6 +246,15 @@ def download(body: DownloadRequest) -> dict[str, str]:
 @app.get("/api/downloads")
 def list_downloads() -> list[dict[str, object]]:
     return [asdict(progress) for progress in DOWNLOADS.list()]
+
+
+@app.post("/api/download/{job_id}/cancel")
+def cancel_download(job_id: str) -> dict[str, object]:
+    try:
+        progress = DOWNLOADS.cancel(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown job") from exc
+    return asdict(progress)
 
 
 @app.get("/api/download/{job_id}")

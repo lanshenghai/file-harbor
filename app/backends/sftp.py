@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import socket
 import stat
+from threading import Event
 
 import paramiko
 
-from .base import Entry
+from .base import DownloadCancelled, Entry
 
 
 class SftpBackend:
@@ -73,9 +74,28 @@ class SftpBackend:
                 files.append((entry.path, entry.size))
         return files
 
-    def download_file(self, remote_path: str, local_path: Path) -> None:
+    def download_file(
+        self, remote_path: str, local_path: Path, cancel_event: Event | None = None
+    ) -> None:
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        self._sftp.get(remote_path, str(local_path))
+        partial_path = local_path.with_name(local_path.name + ".part")
+        try:
+            with self._sftp.open(remote_path, "rb") as source, partial_path.open("wb") as target:
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise DownloadCancelled()
+                    chunk = source.read(256 * 1024)
+                    if not chunk:
+                        break
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise DownloadCancelled()
+                    target.write(chunk)
+            if cancel_event is not None and cancel_event.is_set():
+                raise DownloadCancelled()
+            partial_path.replace(local_path)
+        except BaseException:
+            partial_path.unlink(missing_ok=True)
+            raise
 
     def close(self) -> None:
         sftp = getattr(self, "_sftp", None)

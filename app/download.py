@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from uuid import uuid4
 
-from app.backends import Backend
+from app.backends import Backend, DownloadCancelled
 from app.pathutil import rel_under_root, validate_local_dir
 
 
@@ -24,6 +24,8 @@ class DownloadManager:
     def __init__(self) -> None:
         self._jobs: dict[str, JobProgress] = {}
         self._inflight: dict[str, set[str]] = {}
+        self._cancel_events: dict[str, Event] = {}
+        self._futures: dict[str, set[Future[None]]] = {}
         self._lock = Lock()
 
     def start(self, backend: Backend, root, protocol, items, local_dir, workers=8) -> str:
@@ -41,6 +43,8 @@ class DownloadManager:
         with self._lock:
             self._jobs[job_id] = job
             self._inflight[job_id] = set()
+            self._cancel_events[job_id] = Event()
+            self._futures[job_id] = set()
 
         thread = Thread(
             target=self._run_job,
@@ -57,6 +61,17 @@ class DownloadManager:
     def list(self) -> list[JobProgress]:
         with self._lock:
             return [self._snapshot(job) for job in reversed(self._jobs.values())]
+
+    def cancel(self, job_id: str) -> JobProgress:
+        with self._lock:
+            job = self._jobs[job_id]
+            if job.status in {"done", "done_with_errors", "failed", "cancelled"}:
+                return self._snapshot(job)
+            job.status = "cancelling"
+            self._cancel_events[job_id].set()
+            for future in self._futures[job_id]:
+                future.cancel()
+            return self._snapshot(job)
 
     @staticmethod
     def _snapshot(job: JobProgress) -> JobProgress:
@@ -80,29 +95,53 @@ class DownloadManager:
         local_root: Path,
         workers: int,
     ) -> None:
+        cancel_event = self._cancel_events[job_id]
         try:
+            if cancel_event.is_set():
+                raise DownloadCancelled()
             files = self._expand_items(backend, items)
+            if cancel_event.is_set():
+                raise DownloadCancelled()
             self._update(job_id, status="running", total=len(files))
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
                     executor.submit(
-                        self._download_one, job_id, backend, root, protocol, remote_path, local_root
+                        self._download_one,
+                        job_id,
+                        backend,
+                        root,
+                        protocol,
+                        remote_path,
+                        local_root,
+                        cancel_event,
                     ): remote_path
                     for remote_path in files
                 }
+                with self._lock:
+                    self._futures[job_id] = set(futures)
+                    if cancel_event.is_set():
+                        for future in futures:
+                            future.cancel()
                 for future in as_completed(futures):
                     remote_path = futures[future]
                     try:
                         future.result()
+                    except (CancelledError, DownloadCancelled):
+                        continue
                     except Exception as exc:
                         self._record_error(job_id, f"{remote_path}: {exc}")
                     else:
                         self._mark_done(job_id)
 
-            final = self.get(job_id)
-            status = "done_with_errors" if final.errors else "done"
+            if cancel_event.is_set():
+                status = "cancelled"
+            else:
+                final = self.get(job_id)
+                status = "done_with_errors" if final.errors else "done"
             self._update(job_id, status=status, current="")
+        except DownloadCancelled:
+            self._update(job_id, status="cancelled", current="")
         except Exception as exc:
             self._update(job_id, status="failed", current="")
             self._record_error(job_id, str(exc))
@@ -110,6 +149,8 @@ class DownloadManager:
             # Backend lifecycle belongs to the caller/session layer.
             with self._lock:
                 self._inflight.pop(job_id, None)
+                self._cancel_events.pop(job_id, None)
+                self._futures.pop(job_id, None)
 
     def _expand_items(self, backend: Backend, items: list[dict[str, str]]) -> list[str]:
         seen: set[str] = set()
@@ -141,11 +182,16 @@ class DownloadManager:
         protocol: str,
         remote_path: str,
         local_root: Path,
+        cancel_event: Event,
     ) -> None:
+        if cancel_event.is_set():
+            raise DownloadCancelled()
         self._begin_download(job_id, remote_path)
         try:
             relative = rel_under_root(remote_path, root, protocol)
-            backend.download_file(remote_path, local_root / relative)
+            backend.download_file(remote_path, local_root / relative, cancel_event)
+            if cancel_event.is_set():
+                raise DownloadCancelled()
         finally:
             self._end_download(job_id, remote_path)
 

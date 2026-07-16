@@ -57,3 +57,12 @@ assert.equal(storage.getItem(RottaState.STORAGE_KEY), null);
         capture_output=True,
         text=True,
     )
+
+
+def test_frontend_renders_cancel_action_for_active_jobs():
+    source = (ROOT / "static" / "app.js").read_text()
+
+    assert "function cancelDownloadJob(jobId, button)" in source
+    assert "`/api/download/${encodeURIComponent(jobId)}/cancel`" in source
+    assert '["queued", "running"].includes(job.status)' in source
+    assert 'cancelButton.textContent = "Cancel"' in source

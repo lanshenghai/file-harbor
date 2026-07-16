@@ -1,6 +1,7 @@
 import importlib
 import time
 import sys
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
@@ -259,6 +260,48 @@ def test_api_lists_downloads_without_browser_session(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.json()[0]["id"] == job_id
+
+
+def test_api_cancels_download_without_browser_session(monkeypatch, tmp_path):
+    root = "/root"
+
+    class BlockingBackend(FakeBackend):
+        def __init__(self, tree, files):
+            super().__init__(tree=tree, files=files)
+            self.started = Event()
+
+        def download_file(self, remote_path, local_path, cancel_event=None):
+            self.started.set()
+            if cancel_event is not None:
+                cancel_event.wait(timeout=2)
+
+    backend = BlockingBackend(
+        tree={root: [Entry("a.bin", f"{root}/a.bin", "file", 1)]},
+        files={f"{root}/a.bin": b"x"},
+    )
+    manager = DownloadManager()
+    job_id = manager.start(
+        backend=backend,
+        root=root,
+        protocol="sftp",
+        items=[{"path": f"{root}/a.bin", "type": "file"}],
+        local_dir=str(tmp_path),
+        workers=1,
+    )
+    assert backend.started.wait(timeout=1)
+    main = importlib.import_module("app.main")
+    monkeypatch.setattr(main, "DOWNLOADS", manager)
+    client = TestClient(main.app)
+
+    response = client.post(f"/api/download/{job_id}/cancel")
+    repeated = client.post(f"/api/download/{job_id}/cancel")
+    missing = client.post("/api/download/missing/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelling"
+    assert repeated.status_code == 200
+    assert repeated.json()["status"] in {"cancelling", "cancelled"}
+    assert missing.status_code == 404
 
 
 def test_api_download_rejects_bad_local_dir(monkeypatch):

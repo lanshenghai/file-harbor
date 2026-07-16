@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from io import BytesIO
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -42,6 +44,12 @@ class FakeSftpClient:
         target = Path(local_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(self.files[remote_path])
+
+    def open(self, remote_path: str, mode: str):
+        assert mode == "rb"
+        if remote_path not in self.files:
+            raise FileNotFoundError(remote_path)
+        return BytesIO(self.files[remote_path])
 
     def close(self) -> None:
         self.closed = True
@@ -141,6 +149,46 @@ def test_sftp_backend_classifies_auth_failure(monkeypatch):
             username="alice",
             password="wrong",
         )
+
+
+def test_sftp_download_cancellation_removes_partial_file(monkeypatch, tmp_path):
+    from app.backends import DownloadCancelled
+    from app.backends.sftp import SftpBackend
+
+    cancel_event = Event()
+
+    class CancellingStream(BytesIO):
+        def read(self, size=-1):
+            data = super().read(size)
+            cancel_event.set()
+            return data
+
+    class CancellingSftpClient(FakeSftpClient):
+        def open(self, remote_path: str, mode: str):
+            assert mode == "rb"
+            return CancellingStream(self.files[remote_path])
+
+    fake_sftp = CancellingSftpClient()
+    fake_ssh = FakeSshClient(fake_sftp)
+    fake_paramiko = SimpleNamespace(
+        SSHClient=lambda: fake_ssh,
+        AutoAddPolicy=lambda: "policy",
+        S_ISDIR=lambda mode: bool(mode & 0o040000),
+    )
+    monkeypatch.setattr("app.backends.sftp.paramiko", fake_paramiko)
+    backend = SftpBackend(
+        host="sftp.example.com",
+        root="/root",
+        username="alice",
+        password="secret",
+    )
+    target = tmp_path / "a.txt"
+
+    with pytest.raises(DownloadCancelled):
+        backend.download_file("/root/a.txt", target, cancel_event)
+
+    assert not target.exists()
+    assert not (tmp_path / "a.txt.part").exists()
 
 
 def test_factory_selects_backend_and_rejects_unknown(monkeypatch):

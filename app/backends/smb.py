@@ -5,11 +5,12 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from threading import Event
 import time
 
 from app.pathutil import parse_unc
 
-from .base import Entry
+from .base import DownloadCancelled, Entry
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -77,7 +78,7 @@ class NativeSmbClient:
         last_error: ConnectionError | None = None
         for attempt in range(4):
             try:
-                output = self._run(f'ls "{self._quote(pattern)}"')
+                output = self._run(f'ls "{self._quote(pattern)}"', timeout=20)
                 break
             except ConnectionError as exc:
                 last_error = exc
@@ -100,24 +101,34 @@ class NativeSmbClient:
             entries.append((name, is_dir, size))
         return entries
 
-    def download(self, relative_path: str, local_path: Path) -> None:
+    def download(
+        self, relative_path: str, local_path: Path, cancel_event: Event | None = None
+    ) -> None:
         partial_path = local_path.with_name(local_path.name + ".part")
         last_error: ConnectionError | None = None
 
-        for _ in range(4):
-            action = "reget" if partial_path.exists() and partial_path.stat().st_size else "get"
-            command = (
-                "timeout 600; iosize 262144; "
-                f'{action} "{self._quote(relative_path)}" "{self._quote(str(partial_path))}"'
-            )
-            try:
-                self._run(command, timeout=3600)
-            except ConnectionError as exc:
-                last_error = exc
-                continue
+        try:
+            for _ in range(4):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise DownloadCancelled()
+                action = "reget" if partial_path.exists() and partial_path.stat().st_size else "get"
+                command = (
+                    "timeout 600; iosize 262144; "
+                    f'{action} "{self._quote(relative_path)}" "{self._quote(str(partial_path))}"'
+                )
+                try:
+                    self._run(command, timeout=3600, cancel_event=cancel_event)
+                except ConnectionError as exc:
+                    last_error = exc
+                    continue
 
-            partial_path.replace(local_path)
-            return
+                if cancel_event is not None and cancel_event.is_set():
+                    raise DownloadCancelled()
+                partial_path.replace(local_path)
+                return
+        except DownloadCancelled:
+            partial_path.unlink(missing_ok=True)
+            raise
 
         assert last_error is not None
         raise last_error
@@ -132,34 +143,69 @@ class NativeSmbClient:
             if self.cache_path.exists():
                 self.cache_path.unlink()
 
-    def _run(self, command: str, *, timeout: int = 60) -> str:
+    def _run(
+        self, command: str, *, timeout: int = 60, cancel_event: Event | None = None
+    ) -> str:
         if self._closed:
             raise ConnectionError("SMB session is closed")
 
         env = os.environ.copy()
         env["KRB5CCNAME"] = f"FILE:{self.cache_path}"
-        result = subprocess.run(
-            [
-                str(self.binary),
-                "-s",
-                "/dev/null",
-                "--use-kerberos=required",
-                "-N",
-                "-U",
-                self.principal,
-                f"//{self.host}/{self.share}",
-                "-c",
-                command,
-            ],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-        )
-        stdout = result.stdout.decode(errors="replace")
-        stderr = result.stderr.decode(errors="replace")
-        if result.returncode == 0:
+        args = [
+            str(self.binary),
+            "-s",
+            "/dev/null",
+            "--use-kerberos=required",
+            "-N",
+            "-U",
+            self.principal,
+            f"//{self.host}/{self.share}",
+            "-c",
+            command,
+        ]
+        if cancel_event is None:
+            try:
+                result = subprocess.run(
+                    args,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ConnectionError(f"Native SMB command timed out after {timeout}s") from exc
+            stdout_bytes = result.stdout
+            stderr_bytes = result.stderr
+            returncode = result.returncode
+        else:
+            process = subprocess.Popen(
+                args,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.monotonic() + timeout
+            while process.poll() is None:
+                if cancel_event.is_set():
+                    process.terminate()
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    raise DownloadCancelled()
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    process.wait()
+                    raise ConnectionError(f"Native SMB command timed out after {timeout}s")
+                time.sleep(0.05)
+            stdout_bytes, stderr_bytes = process.communicate()
+            returncode = process.returncode
+
+        stdout = stdout_bytes.decode(errors="replace")
+        stderr = stderr_bytes.decode(errors="replace")
+        if returncode == 0:
             return stdout
 
         detail = (stderr or stdout).strip()
@@ -249,9 +295,11 @@ class SmbBackend:
                 files.append((entry.path, entry.size))
         return files
 
-    def download_file(self, remote_path: str, local_path: Path) -> None:
+    def download_file(
+        self, remote_path: str, local_path: Path, cancel_event: Event | None = None
+    ) -> None:
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        self._client.download(self._relative(remote_path), local_path)
+        self._client.download(self._relative(remote_path), local_path, cancel_event)
 
     def close(self) -> None:
         self._client.close()

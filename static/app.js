@@ -204,6 +204,20 @@ function persistAppState() {
   RottaState.save(localStorage, state);
 }
 
+async function cancelDownloadJob(jobId, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/download/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+    });
+    setStatus(`Cancelling download ${jobId.slice(0, 8)}…`);
+    await pollDownloadQueue();
+  } catch (error) {
+    button.disabled = false;
+    setStatus(`Cancel failed: ${error.message}`, true);
+  }
+}
+
 function renderDownloadQueue(jobs) {
   if (!jobs.length) {
     const empty = document.createElement("div");
@@ -226,7 +240,27 @@ function renderDownloadQueue(jobs) {
     id.title = job.id;
     const summary = document.createElement("span");
     summary.textContent = `${job.status} ${job.done}/${job.total}`;
-    header.append(id, summary);
+    const actions = document.createElement("span");
+    actions.className = "download-job-actions";
+    actions.appendChild(summary);
+    if (["queued", "running"].includes(job.status)) {
+      const cancelButton = document.createElement("button");
+      cancelButton.type = "button";
+      cancelButton.className = "cancel-job";
+      cancelButton.textContent = "Cancel";
+      cancelButton.addEventListener("click", () =>
+        cancelDownloadJob(job.id, cancelButton)
+      );
+      actions.appendChild(cancelButton);
+    } else if (job.status === "cancelling") {
+      const cancelButton = document.createElement("button");
+      cancelButton.type = "button";
+      cancelButton.className = "cancel-job";
+      cancelButton.textContent = "Cancelling…";
+      cancelButton.disabled = true;
+      actions.appendChild(cancelButton);
+    }
+    header.append(id, actions);
 
     const progress = document.createElement("progress");
     progress.max = Math.max(job.total, 1);

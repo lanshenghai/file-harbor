@@ -1,3 +1,3 @@
-from .base import Backend, Entry, FakeBackend
+from .base import Backend, DownloadCancelled, Entry, FakeBackend
 
-__all__ = ["Backend", "Entry", "FakeBackend"]
+__all__ = ["Backend", "DownloadCancelled", "Entry", "FakeBackend"]
