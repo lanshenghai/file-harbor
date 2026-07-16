@@ -34,6 +34,22 @@ def _patch_saved_credentials(monkeypatch, main, username="alice", password="secr
     )
 
 
+def test_api_returns_ui_defaults_from_environment(monkeypatch):
+    main = importlib.import_module("app.main")
+    monkeypatch.setenv("REMOTE_PATH", r"\\files.example.com\shared\project")
+    monkeypatch.setenv("LOCAL_DIR", "/srv/downloads")
+    monkeypatch.setenv("WORKERS", "6")
+
+    response = TestClient(main.app).get("/api/config")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "remote_path": r"\\files.example.com\shared\project",
+        "local_dir": "/srv/downloads",
+        "workers": 6,
+    }
+
+
 def test_api_connect_tree_download_and_delete(monkeypatch, tmp_path):
     root = "/root"
     backend = CloseTrackingBackend(

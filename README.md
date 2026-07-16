@@ -19,9 +19,10 @@ Create a project-local configuration file:
 cp .env.example .env
 ```
 
-Edit `.env` with the SFTP host, SMB domain, credentials, and web server bind
-settings. It is loaded automatically when the app starts and is ignored by Git.
-Existing shell environment variables take precedence over values in `.env`.
+Edit `.env` with the SFTP host, SMB domain, credentials, web server bind
+settings, and UI defaults (`REMOTE_PATH`, `LOCAL_DIR`, and `WORKERS`). It is
+loaded automatically when the app starts and is ignored by Git. Existing shell
+environment variables take precedence over values in `.env`.
 
 Instead of storing credentials in `.env`, set `SMB_CREDENTIALS` there to a file
 containing:

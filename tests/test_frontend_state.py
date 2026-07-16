@@ -15,6 +15,15 @@ def test_frontend_polls_global_download_queue_after_refresh():
     assert "saved.jobId" not in source
 
 
+def test_frontend_loads_form_defaults_from_config_api():
+    source = (ROOT / "static" / "app.js").read_text()
+
+    assert 'api("/api/config")' in source
+    assert "connectForm.elements.remote_path.value = defaults.remote_path" in source
+    assert "downloadForm.elements.local_dir.value = defaults.local_dir" in source
+    assert "downloadForm.elements.workers.value = String(defaults.workers)" in source
+
+
 def test_download_state_storage_round_trip():
     script = r"""
 const assert = require("node:assert/strict");

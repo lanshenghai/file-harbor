@@ -85,6 +85,23 @@ async function api(url, options = {}) {
   return response.json();
 }
 
+async function loadUiDefaults() {
+  try {
+    const defaults = await api("/api/config");
+    if (defaults.remote_path) {
+      connectForm.elements.remote_path.value = defaults.remote_path;
+    }
+    if (defaults.local_dir) {
+      downloadForm.elements.local_dir.value = defaults.local_dir;
+    }
+    if (Number.isInteger(defaults.workers)) {
+      downloadForm.elements.workers.value = String(defaults.workers);
+    }
+  } catch (error) {
+    setStatus(`Could not load defaults: ${error.message}`, true);
+  }
+}
+
 async function loadTree(path = state.root, container = null) {
   const entries = await api(
     `/api/tree?session_id=${encodeURIComponent(state.sessionId)}&path=${encodeURIComponent(path)}`
@@ -473,6 +490,7 @@ for (const radio of connectForm.querySelectorAll('input[name="protocol"]')) {
 
 syncProtocolVisibility();
 updateSelectionCount();
+loadUiDefaults();
 pollDownloadQueue();
 setInterval(pollDownloadQueue, 500);
 restoreAppState();

@@ -172,6 +172,19 @@ def favicon() -> FileResponse:
     return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
 
 
+@app.get("/api/config")
+def ui_config() -> dict[str, str | int]:
+    try:
+        workers = int(os.environ.get("WORKERS", "8"))
+    except ValueError:
+        workers = 8
+    return {
+        "remote_path": os.environ.get("REMOTE_PATH", ""),
+        "local_dir": os.environ.get("LOCAL_DIR", ""),
+        "workers": max(1, min(16, workers)),
+    }
+
+
 @app.post("/api/connect")
 def connect(body: ConnectRequest) -> dict[str, str]:
     username, password, domain = _resolve_connect_credentials(body.protocol)
