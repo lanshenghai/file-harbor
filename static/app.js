@@ -377,6 +377,9 @@ function renderDownloadQueue(jobs) {
     const progress = document.createElement("progress");
     progress.max = Math.max(job.total, 1);
     progress.value = job.done;
+    if (["failed", "done_with_errors", "cancelled"].includes(job.status)) {
+      progress.className = "progress-abnormal";
+    }
 
     const current = document.createElement("div");
     current.className = "mono muted";

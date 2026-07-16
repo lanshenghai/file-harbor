@@ -403,6 +403,23 @@ button.remove-job:hover {
 progress {
   width: 100%;
   height: 10px;
+  accent-color: #388bfd;
+}
+
+progress.progress-abnormal {
+  accent-color: #6e7681;
+}
+
+progress.progress-abnormal::-webkit-progress-value {
+  background: #6e7681;
+}
+
+progress.progress-abnormal::-webkit-progress-bar {
+  background: #21262d;
+}
+
+progress.progress-abnormal::-moz-progress-bar {
+  background: #6e7681;
 }
 
 .statusbar {

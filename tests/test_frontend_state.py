@@ -105,6 +105,13 @@ def test_frontend_sets_hover_title_for_download_file_list():
     assert "current.title = job.current || \"\";" in source
 
 
+def test_frontend_grays_progress_bar_for_abnormal_jobs():
+    source = (ROOT / "static" / "app.js").read_text()
+
+    assert 'progress.className = "progress-abnormal"' in source
+    assert '["failed", "done_with_errors", "cancelled"].includes(job.status)' in source
+
+
 def test_frontend_shows_job_protocol_and_workers():
     source = (ROOT / "static" / "app.js").read_text()
 
